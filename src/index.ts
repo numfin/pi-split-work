@@ -6,8 +6,9 @@ import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendArtifact, appendTaskNote, artifactName, createTask, listTasks, loadTask, pauseRunningTasks, resetTracker, saveTask, taskContext, type Task } from "./tracker.ts";
+import { childExtensionArgs, childToolBlock, childTools } from "./child-config.ts";
 
 const child = process.env.PI_SPLIT_CHILD === "1";
 const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -64,15 +65,16 @@ async function runChild(cwd: string, task: Task, agent: Agent, session: string, 
   onActivity: (activity: ChildActivity) => void): Promise<{ overview: string; tokens: number }> {
   // Artifacts are routed through the controller, not automatically read by other agents.
   const prompt = taskContext(trackerDir(cwd), task.id, false);
+  const extensionArgs = childExtensionArgs(fileURLToPath(import.meta.url), getAgentDir());
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-split-"));
   const system = path.join(temp, "agent.txt");
   const artifactRule = agent.artifact
     ? `Publish your findings through split_artifact (content); it writes a new ${agent.artifact}/<number>.md for the controller. Do not write artifact files with shell or file tools. `
     : "Do not create or edit Markdown files. ";
   fs.writeFileSync(system, `${agent.body}\n\nYou are one subagent assigned one bounded task. Keep task notes, acceptance criteria, artifacts, and overviews as short as possible: include only relevant, useful information needed for the next step. No prompt restatement, filler, generic summaries, or redundant checks. Prefer concise bullets and exact paths/results; preserve critical context. ${artifactRule}Never edit existing documentation or read .pi/tracker or .pi/my-agents directly. If blocked or needing clarification, call split_report kind=question with the specific question, then stop and return. Controller will resume this persistent session with an answer. Use split_report kind=progress only for meaningful milestones or a known delay reason; routine tool activity is tracked automatically. Return a minimal overview of changes and checks.\n`, { mode: 0o600 });
-  const args = ["--mode", "rpc", "--no-extensions", "--no-mcp", "--extension", fileURLToPath(import.meta.url),
+  const args = ["--mode", "rpc", ...extensionArgs,
     "--session-id", session, "--model", agent.model, "--thinking", agent.think,
-    "--tools", agent.artifact ? "read,bash,edit,write,split_report,split_artifact" : "read,bash,edit,write,split_report",
+    "--tools", childTools(Boolean(agent.artifact)),
     "--append-system-prompt", system];
   const initialPrompt = `Task ${task.id} (revision ${task.revision}). Continue from your session if previous work exists.\n${prompt}\nController guidance: ${guidance || "Carry out the assigned work; report blockers."}`;
   let overview = "", tokens = 0, errorMessage = "", stderr = "", buffer = "", aborted = false;
@@ -135,7 +137,8 @@ async function runChild(cwd: string, task: Task, agent: Agent, session: string, 
           }
           if (event.type === "tool_execution_start") {
             const input = event.args ?? {};
-            const detail = input.command ?? input.path ?? input.content ?? "";
+            const detail = input.command ?? input.cmd ?? input.path ?? input.content ??
+              (input.session_id !== undefined ? `session ${input.session_id}` : "");
             if (event.toolName === "split_report" && input.kind === "question")
               overview = String(input.content).slice(0, 1200);
             onActivity({ activity: event.toolName === "split_report" ? String(input.content).slice(0, 240) : `${event.toolName}: ${String(detail).replace(/\s+/g, " ").slice(0, 180)}`,
@@ -206,19 +209,8 @@ export default function (pi: ExtensionAPI) {
       });
     }
     pi.on("tool_call", event => {
-      // ponytail: File-tool guard is not a shell sandbox; use trusted agents or add OS isolation.
-      if (["read", "edit", "write"].includes(event.toolName)) {
-        const file = (event.input as { path?: string }).path;
-        if (typeof file === "string") {
-          const resolved = path.resolve(process.cwd(), file);
-          const project = root(process.cwd());
-          if (resolved === modeFile(process.cwd()) || resolved.startsWith(path.join(project, "tracker") + path.sep) || resolved.startsWith(path.join(project, "my-agents") + path.sep) ||
-              (event.toolName !== "read" && /\.md$/i.test(resolved)))
-            return { block: true, reason: "Use split_artifact for artifacts; ask controller for task context. No direct tracker or documentation edits." };
-        }
-      }
-      if (event.toolName === "bash" && /\.pi[\\/](?:tracker|my-agents)/.test(String((event.input as { command?: string }).command)))
-        return { block: true, reason: "Ask controller for task context; do not access tracker files." };
+      const reason = childToolBlock(process.cwd(), event.toolName, event.input as Record<string, unknown>);
+      if (reason) return { block: true, reason };
     });
     return;
   }

@@ -4,7 +4,7 @@ A Pi extension that turns your current session into a controller for small, pers
 
 ## Install
 
-Requires Pi on `PATH` and configured access to your agents' models. Tested with Pi 1.3.0.
+Requires Pi on `PATH` and configured access to your agents' models. Tested with Pi 1.4.0.
 
 From a local checkout:
 
@@ -16,6 +16,14 @@ From GitHub:
 
 ```sh
 pi install git:github.com/numfin/pi-split-work
+```
+
+Children explicitly load these packages (install/configure them in Pi before delegating):
+
+```sh
+pi install npm:@xynogen/pix-optimizer
+pi install npm:pi-gpt-search
+pi install npm:pi-openai-codex-compat
 ```
 
 Restart Pi after installation. If you already installed `split-work` manually, move its folder out of `~/.pi/agent/extensions/` first to avoid loading two copies. Agent definitions and tracker data live in your projects, not that extension folder.
@@ -91,7 +99,7 @@ Keep output minimal. Do not implement fixes.
 
 ## MVP limits
 
-Use one controller per project. Parallel agents share files: avoid overlapping edits. Guards are not a shell sandbox; use trusted agents and review their changes. Children load this extension but no other extensions or MCP servers. Saved child sessions survive tracker reset.
+Use one controller per project. Parallel agents share files: avoid overlapping edits. Guards are not a shell sandbox; use trusted agents and review their changes. Children load split-work plus the three packages listed above; unrelated extensions and MCP servers stay disabled. Their model-specific settings and credentials still apply. Saved child sessions survive tracker reset.
 
 ## Development
 
@@ -100,4 +108,4 @@ npm test
 pi --no-extensions --extension ./src/index.ts
 ```
 
-Tests cover file-backed task tracking. The extension loads directly as TypeScript; no build step.
+Tests cover file-backed tracking, child package/tool selection, and tracker/documentation guards. The extension loads directly as TypeScript; no build step.

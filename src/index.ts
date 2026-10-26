@@ -9,6 +9,8 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { getAgentDir, parseFrontmatter, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { appendArtifact, appendTaskNote, artifactName, createTask, listTasks, loadTask, pauseRunningTasks, resetTracker, saveTask, taskContext, type Task } from "./tracker.ts";
 import { childExtensionArgs, childToolBlock, childTools } from "./child-config.ts";
+import { readSplitConfig, splitConfigPath, summaryConfig, updateSplitConfig, type SummaryConfig } from "./mode-config.ts";
+import { FooterSummarizer, summarySystem } from "./footer-summary.ts";
 
 const child = process.env.PI_SPLIT_CHILD === "1";
 const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -16,16 +18,12 @@ const agentName = (name: string) => { if (!/^[a-z][a-z0-9-]{0,39}$/.test(name)) 
 const root = (cwd: string) => path.join(cwd, ".pi");
 const agentsDir = (cwd: string) => path.join(root(cwd), "my-agents");
 const trackerDir = (cwd: string) => path.join(root(cwd), "tracker");
-const modeFile = (cwd: string) => path.join(root(cwd), "split-mode.json");
 function readMode(cwd: string): boolean {
-  try { return JSON.parse(fs.readFileSync(modeFile(cwd), "utf8")).enabled === true; }
+  try { return readSplitConfig(cwd).enabled === true; }
   catch { return false; }
 }
 function writeMode(cwd: string, enabled: boolean) {
-  const target = modeFile(cwd), temp = `${target}.${randomBytes(4).toString("hex")}.tmp`;
-  fs.mkdirSync(root(cwd), { recursive: true });
-  try { fs.writeFileSync(temp, JSON.stringify({ enabled }) + "\n", { flag: "wx" }); fs.renameSync(temp, target); }
-  finally { if (fs.existsSync(temp)) fs.unlinkSync(temp); }
+  updateSplitConfig(cwd, { enabled });
 }
 type Agent = { name: string; description: string; model: string; think: string; body: string; artifact?: string };
 const summary = (task: Task) => ({ id: task.id, title: task.title, status: task.status, revision: task.revision,
@@ -37,9 +35,10 @@ function runStatus(task: Task) {
   return { elapsedSeconds: run.startedAt ? Math.round(((run.endedAt ?? now) - run.startedAt) / 1000) : undefined,
     activity: run.activity, activitySeconds: run.activitySince ? Math.round(((run.endedAt ?? now) - run.activitySince) / 1000) : undefined,
     secondsSinceUpdate: run.updatedAt ? Math.round((now - run.updatedAt) / 1000) : undefined,
-    question: run.question, recent: run.recent, lastSteering: run.lastSteering };
+    question: run.question, progress: run.progress, footerSummary: run.footerSummary,
+    recent: run.recent, lastSteering: run.lastSteering };
 }
-type ChildActivity = { activity: string; question?: string; toolId?: string; finished?: boolean; steeringId?: string };
+type ChildActivity = { activity: string; question?: string; toolId?: string; finished?: boolean; steeringId?: string; progress?: string; reportOnly?: boolean };
 type Steer = (message: string) => Promise<void>;
 
 function agents(cwd: string): Agent[] {
@@ -143,6 +142,7 @@ async function runChild(cwd: string, task: Task, agent: Agent, session: string, 
               overview = String(input.content).slice(0, 1200);
             onActivity({ activity: event.toolName === "split_report" ? String(input.content).slice(0, 240) : `${event.toolName}: ${String(detail).replace(/\s+/g, " ").slice(0, 180)}`,
               toolId: event.toolCallId,
+              progress: event.toolName === "split_report" ? String(input.content).slice(0, 300) : undefined,
               question: event.toolName === "split_report" && input.kind === "question" ? String(input.content).slice(0, 1200) : undefined });
           }
           if (event.type === "tool_execution_end")
@@ -153,6 +153,7 @@ async function runChild(cwd: string, task: Task, agent: Agent, session: string, 
           const msg = event.message;
           const latest = msg.content?.filter((p: { type: string }) => p.type === "text").map((p: { text: string }) => p.text).join("\n");
           if (latest) overview = latest;
+          if (latest) onActivity({ activity: "", progress: latest.slice(0, 300), reportOnly: true });
           tokens += (msg.usage?.input ?? 0) + (msg.usage?.output ?? 0);
           errorMessage = msg.stopReason === "error" || msg.stopReason === "aborted" ? (msg.errorMessage || msg.stopReason) : "";
         } catch { /* skip diagnostics that are not JSONL */ }
@@ -227,6 +228,12 @@ export default function (pi: ExtensionAPI) {
   const jobs = new Map<string, AbortController>();
   const steerers = new Map<string, Steer>();
   let shuttingDown = false;
+  let summarySettings: SummaryConfig = { enabled: false, reasoning: "off" };
+  let summarizer: FooterSummarizer | undefined;
+  let watchedConfig: string | undefined;
+  let configListener: (() => void) | undefined;
+  let summarySignature = "";
+  let summaryErrorAt = 0;
   const removeFooter = (ctx: ExtensionContext) => {
     if (!footerInstalled || ctx.mode !== "tui") return;
     ctx.ui.setFooter(undefined);
@@ -257,7 +264,8 @@ export default function (pi: ExtensionAPI) {
             const prefix = theme.fg("accent", `[${last.agent}]`) + ": ";
             const suffix = theme.fg(task.status === "running" ? "success" : "muted", `[${state}]`);
             const titleWidth = Math.max(0, width - visibleWidth(prefix) - visibleWidth(suffix) - 1);
-            return truncateToWidth(prefix + truncateToWidth(task.title, titleWidth) + " " + suffix, width);
+            const title = summarySettings.enabled ? last.footerSummary || task.title : task.title;
+            return truncateToWidth(prefix + truncateToWidth(title, titleWidth) + " " + suffix, width);
           });
           if (footerTasks.length > 8) lines.push(theme.fg("muted", `+${footerTasks.length - 8} more sessions`));
           const branch = footerData.getGitBranch();
@@ -272,6 +280,23 @@ export default function (pi: ExtensionAPI) {
     footerTasks = listTasks(trackerDir(ctx.cwd)).filter(t => t.status !== "archived" && t.runs.length > 0);
     installFooter(ctx);
     renderFooter();
+  };
+  const loadSummarySettings = (ctx: ExtensionContext) => {
+    try {
+      const settings = summaryConfig(readSplitConfig(ctx.cwd).summary);
+      const signature = JSON.stringify(settings);
+      if (signature === summarySignature) return;
+      if (settings.enabled && !ctx.modelRegistry.getAvailable().some(m => m.provider === settings.provider && m.id === settings.model))
+        throw new Error(`Summary model unavailable: ${settings.provider}/${settings.model}`);
+      summarySettings = settings; summarySignature = signature;
+      summarizer?.configure(settings);
+      refreshFooter(ctx);
+    } catch (error) {
+      summarySettings = { enabled: false, reasoning: "off" }; summarySignature = "";
+      summarizer?.configure(summarySettings);
+      refreshFooter(ctx);
+      ctx.ui.notify(String(error).slice(0, 300), "warning");
+    }
   };
   const setMode = (value: boolean, ctx: ExtensionContext) => {
     enabled = value;
@@ -337,10 +362,47 @@ export default function (pi: ExtensionAPI) {
     },
   });
   pi.registerCommand("split", {
-    description: "Controller mode: /split on|off|status|reset (reset deletes tracker tasks/artifacts, keeps agents)",
+    description: "Controller: /split on|off|status|reset; footer summaries: /split summary on <provider/model> <seconds> [reasoning], off, status",
     handler: async (args, ctx) => {
+      const words = args.trim().split(/\s+/);
+      if (words[0]?.toLowerCase() === "summary") {
+        const action = words[1]?.toLowerCase() || "status";
+        try {
+          if (action === "status") {
+            loadSummarySettings(ctx);
+            ctx.ui.notify(`Footer summary: ${JSON.stringify(summarySettings)}`, "info"); return;
+          }
+          const rawSummary = readSplitConfig(ctx.cwd).summary;
+          if (action === "off" && words.length === 2) {
+            let disabled: SummaryConfig;
+            try {
+              disabled = summaryConfig({ ...(rawSummary && typeof rawSummary === "object" ? rawSummary : {}), enabled: false });
+            } catch { disabled = { enabled: false, reasoning: "off" }; }
+            updateSplitConfig(ctx.cwd, { summary: disabled });
+          } else if (action === "on") {
+            const saved = summaryConfig(rawSummary);
+            let next: SummaryConfig;
+            if (words.length === 2) next = summaryConfig({ ...saved, enabled: true });
+            else {
+              if (words.length < 4 || words.length > 5) throw new Error("Usage: /split summary on <provider/model> <seconds> [reasoning]");
+              const slash = words[2].indexOf("/");
+              if (slash < 1) throw new Error("Use an exact provider/model ID");
+              next = summaryConfig({ enabled: true, provider: words[2].slice(0, slash), model: words[2].slice(slash + 1),
+                intervalSeconds: Number(words[3]), reasoning: words[4] ?? "off" });
+            }
+            if (!ctx.modelRegistry.getAvailable().some(m => m.provider === next.provider && m.id === next.model))
+              throw new Error(`Summary model unavailable: ${next.provider}/${next.model}`);
+            updateSplitConfig(ctx.cwd, { summary: next });
+          } else throw new Error("Use /split summary on <provider/model> <seconds> [reasoning], /split summary off or /split summary status");
+          loadSummarySettings(ctx);
+          ctx.ui.notify(`Footer summary ${summarySettings.enabled ? "ON" : "OFF"}`, "info");
+        } catch (error) { ctx.ui.notify(`${String(error).slice(0, 240)}. First enable: /split summary on <provider/model> <seconds> [reasoning]`, "warning"); }
+        return;
+      }
       const option = args.trim().toLowerCase();
-      if (option === "status" || !option) { ctx.ui.notify(`Split mode ${enabled ? "ON" : "OFF"}`, "info"); return; }
+      if (option === "status" || !option) {
+        ctx.ui.notify(`Split mode ${enabled ? "ON" : "OFF"} · footer summary ${summarySettings.enabled ? "ON" : "OFF"}`, "info"); return;
+      }
       if (option === "reset") {
         const tasks = listTasks(trackerDir(ctx.cwd));
         if (processes.size || tasks.some(task => task.status === "running")) {
@@ -380,6 +442,45 @@ export default function (pi: ExtensionAPI) {
     const last = ctx.sessionManager.getBranch().filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "split-mode").at(-1) as { data?: { enabled: boolean; previousTools?: string[] } } | undefined;
     previousTools = last?.data?.previousTools;
     setMode(last?.data?.enabled ?? readMode(ctx.cwd), ctx);
+    summarizer = new FooterSummarizer({
+      snapshot: () => listTasks(trackerDir(ctx.cwd)).filter(task => task.status === "running").flatMap(task => {
+        const run = task.runs.at(-1);
+        return run?.id ? [{ task: task.id, run: run.id, agent: run.agent, title: task.title,
+          activity: run.activity, progress: run.progress, question: run.question,
+          elapsedSeconds: run.startedAt ? Math.round((Date.now() - run.startedAt) / 1000) : undefined,
+          activitySeconds: run.activitySince ? Math.round((Date.now() - run.activitySince) / 1000) : undefined }] : [];
+      }),
+      complete: async (settings, prompt, signal) => {
+        const model = ctx.modelRegistry.find(settings.provider!, settings.model!);
+        if (!model) throw new Error("Summary model is no longer available");
+        const stream = ctx.modelRegistry.streamSimple(model, {
+          systemPrompt: summarySystem, messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+        }, { signal, reasoning: settings.reasoning === "off" ? undefined : settings.reasoning, maxTokens: 2048 });
+        const response = await stream.result();
+        if (response.stopReason === "error" || response.stopReason === "aborted")
+          throw new Error(response.errorMessage || response.stopReason);
+        return response.content.filter(part => part.type === "text").map(part => part.text).join("");
+      },
+      apply: (snapshot, text) => {
+        if (shuttingDown) return;
+        let task: Task;
+        try { task = loadTask(trackerDir(ctx.cwd), snapshot.task); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+        const run = task.runs.at(-1);
+        if (task.status !== "running" || run?.id !== snapshot.run) return;
+        run.footerSummary = text; run.footerSummaryAt = Date.now();
+        saveTask(trackerDir(ctx.cwd), task); refreshFooter(ctx);
+      },
+      error: error => {
+        if (Date.now() - summaryErrorAt < 60000) return;
+        summaryErrorAt = Date.now(); ctx.ui.notify(`Footer summary: ${String(error).slice(0, 240)}`, "warning");
+      },
+    });
+    summarySignature = "";
+    loadSummarySettings(ctx);
+    watchedConfig = splitConfigPath(ctx.cwd);
+    configListener = () => { if (!shuttingDown) loadSummarySettings(ctx); };
+    fs.watchFile(watchedConfig, { interval: 1000, persistent: false }, configListener);
     if (ctx.mode === "tui") {
       footerInitTimer = setTimeout(() => {
         footerInitTimer = undefined;
@@ -390,6 +491,9 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("session_shutdown", (_event, ctx) => {
     shuttingDown = true;
+    summarizer?.stop();
+    if (watchedConfig && configListener) fs.unwatchFile(watchedConfig, configListener);
+    watchedConfig = undefined; configListener = undefined;
     if (footerInitTimer) clearTimeout(footerInitTimer);
     footerInitTimer = undefined;
     for (const controller of jobs.values()) controller.abort();
@@ -481,6 +585,8 @@ export default function (pi: ExtensionAPI) {
             if (shuttingDown) return;
             const latest = loadTask(dir, task.id), run = latest.runs.find(item => item.id === attempt)!;
             const time = Date.now();
+            if (event.progress) run.progress = event.progress;
+            if (event.reportOnly) { run.updatedAt = time; saveTask(dir, latest); return; }
             if (event.steeringId) {
               if (run.lastSteering?.id === event.steeringId) {
                 run.lastSteering.status = "delivered"; run.lastSteering.deliveredAt = time;

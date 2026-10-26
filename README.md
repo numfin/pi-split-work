@@ -71,6 +71,36 @@ Restarted work appears paused. Enable split mode if necessary, then say **contin
 | `/split reset` | Confirm deletion of tracker/tasks/artifacts; keep agents and saved child sessions |
 | `/split-agent <description>` | Ask this session to create a project-local agent |
 
+### Optional LLM footer summaries
+
+Disabled by default. Enable with an exact provider/model, period in seconds, and optional reasoning level (default `off`):
+
+```text
+/split summary on provider/model 30 off
+/split summary status
+/split summary off
+/split summary on
+```
+
+The last command reuses saved settings; first enable requires model and period. Toggle or change settings without restarting. Reasoning levels: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; your model must support the chosen level.
+
+Settings live in the project's `.pi/split-mode.json`; edits to `summary` also reload live:
+
+```json
+{
+  "enabled": true,
+  "summary": {
+    "enabled": false,
+    "provider": "provider",
+    "model": "model",
+    "intervalSeconds": 30,
+    "reasoning": "off"
+  }
+}
+```
+
+The selected model receives compact snapshots of running agents' tool activity and public progress reports, **not private reasoning or full task context**. It does not interrupt or prompt subagents. One request batches changed activity (up to 40 agents); unchanged snapshots and idle periods cost no calls. Results replace footer labels with one sentence, at most 10 words, without renaming tasks. Original labels return when disabled. Invalid/failed responses keep the previous label.
+
 ## Agent definitions
 
 Agents are always project-local: `.pi/my-agents/<name>.md`.
@@ -108,4 +138,4 @@ npm test
 pi --no-extensions --extension ./src/index.ts
 ```
 
-Tests cover file-backed tracking, child package/tool selection, and tracker/documentation guards. The extension loads directly as TypeScript; no build step.
+Tests cover tracking, child packages/tools and guards, summary configuration, batching, cancellation, and output limits. The extension loads directly as TypeScript; no build step.

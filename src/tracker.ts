@@ -2,11 +2,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
 
-export type Run = { id?: string; session: string; agent: string; revision: number; status: "running" | "paused" | "done" | "failed"; guidance?: string; overview?: string; tokens?: number;
+export type Run = { id?: string; session: string; agent: string; revision: number; status: "running" | "paused" | "done" | "failed"; guidance?: string; overview?: string; tokens?: number; model?: string; think?: string; sessionFile?: string; base?: { name: string; version: number };
   startedAt?: number; endedAt?: number; updatedAt?: number; activity?: string; activitySince?: number; question?: string;
   progress?: string; footerSummary?: string; footerSummaryAt?: number; recent?: { activity: string; durationMs: number }[];
   lastSteering?: { id: string; content: string; revision: number; sentAt: number; status: "sending" | "queued" | "delivered" | "unconfirmed"; deliveredAt?: number } };
-export type Task = { id: string; title: string; status: "open" | "running" | "paused" | "review" | "stale" | "blocked" | "archived"; revision: number; runs: Run[] };
+export type Task = { id: string; title: string; status: "open" | "running" | "paused" | "review" | "stale" | "blocked" | "archived"; revision: number; runs: Run[]; basePreparation?: { name: string; agent: string } };
 export const artifactName = (name: string) => {
   if (!/^[a-z][a-z0-9-]{0,39}$/.test(name) || name === "requirements") throw new Error("Invalid artifact folder");
   return name;

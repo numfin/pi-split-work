@@ -71,14 +71,34 @@ test("disable aborts in-flight request and discards late results without overlap
   assert.equal(state.applied.length, 0);
 });
 
-test("invalid output does not replace footer titles; errors are reported", async t => {
+test("invalid JSON does not replace footer titles; errors are reported", async t => {
   const { state, summarizer } = fixture(t, { complete: async () => "not JSON" });
   summarizer.configure(config);
   await summarizer.tick();
   assert.equal(state.applied.length, 0);
   assert.equal(state.errors.length, 1);
-  assert.equal(cleanSummary("Одно два три четыре пять шесть семь восемь девять десять одиннадцать"), undefined);
-  assert.equal(cleanSummary("Первое предложение. Второе предложение."), undefined);
-  assert.equal(cleanSummary("x".repeat(161)), undefined);
+});
+
+test("summary length and sentence count are not validated or truncated", async t => {
+  const text = "One two three four five six seven eight nine ten eleven. " + "x".repeat(161);
+  const { state, summarizer } = fixture(t, { complete: async () => JSON.stringify({ 0: text }) });
+  summarizer.configure(config);
+  await summarizer.tick();
+  await summarizer.tick();
+  assert.equal(state.applied[0].text, text);
+  assert.equal(state.applied.length, 1);
+  assert.equal(state.errors.length, 0);
+  assert.equal(cleanSummary("Checking tests"), "Checking tests");
+});
+
+test("summary text is sanitized for the terminal; missing text is ignored", async t => {
   assert.equal(cleanSummary("\u001bПроверяет\n тесты."), "Проверяет тесты.");
+  assert.equal(cleanSummary(" \n "), undefined);
+  assert.equal(cleanSummary(null), undefined);
+  assert.equal(cleanSummary(42), undefined);
+  const { state, summarizer } = fixture(t, { complete: async () => '{"0":null}' });
+  summarizer.configure(config);
+  await summarizer.tick();
+  assert.equal(state.applied.length, 0);
+  assert.equal(state.errors.length, 0);
 });

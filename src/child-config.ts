@@ -5,7 +5,6 @@ import * as fs from "node:fs";
 export const childPackages = [
   "npm:@xynogen/pix-optimizer",
   "npm:pi-gpt-search",
-  "npm:pi-openai-codex-compat",
 ] as const;
 
 export function childExtensionArgs(extensionPath: string, agentDir: string): string[] {

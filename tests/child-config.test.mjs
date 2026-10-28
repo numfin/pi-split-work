@@ -5,11 +5,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { childExtensionArgs, childPackages, childToolBlock, childTools } from "../src/child-config.ts";
 
-test("children load only split-work and the three installed extension packages", t => {
+test("children load only split-work and the two installed extension packages", t => {
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "split-child-packages-"));
   t.after(() => fs.rmSync(agentDir, { recursive: true, force: true }));
   assert.deepEqual(childPackages, [
-    "npm:@xynogen/pix-optimizer", "npm:pi-gpt-search", "npm:pi-openai-codex-compat",
+    "npm:@xynogen/pix-optimizer", "npm:pi-gpt-search",
   ]);
   const installed = childPackages.map(source => path.join(agentDir, "npm", "node_modules", source.slice(4)));
   for (const dir of installed) {
@@ -18,7 +18,7 @@ test("children load only split-work and the three installed extension packages",
   }
   assert.deepEqual(childExtensionArgs("/package/src/index.ts", agentDir), [
     "--no-extensions", "--no-mcp", "--extension", "/package/src/index.ts",
-    "--extension", installed[0], "--extension", installed[1], "--extension", installed[2],
+    "--extension", installed[0], "--extension", installed[1],
   ]);
   fs.rmSync(installed[0], { recursive: true });
   assert.throws(() => childExtensionArgs("/package/src/index.ts", agentDir), /pi install npm:@xynogen\/pix-optimizer/);
